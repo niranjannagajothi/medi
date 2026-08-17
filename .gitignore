@@ -58,3 +58,6 @@ frontend/dist/
 *.db
 data/uploaded_datasets/
 data/knowledge_base/
+
+# CatBoost training telemetry
+catboost_info/
