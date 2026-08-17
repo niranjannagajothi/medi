@@ -3,12 +3,14 @@ import numpy as np
 import os
 import json
 
+from backend import paths
+
 def get_component_weights(device_type):
     critical = ["battery", "power supply", "power unit", "control board", "drive motor", "oxygen system", "compressor", "pump"]
     sensors = ["sensor", "temperature sensor", "pressure sensor", "flow sensor", "lead cable", "electrode set", "ecg sensor"]
     
     weights = {}
-    models_dir = r"C:\Users\Dhamodaran G\Desktop\CTS\models"
+    models_dir = paths.MODELS_DIR
     ontology_path = os.path.join(models_dir, "component_ontology.json")
     
     components = []
@@ -35,7 +37,7 @@ def calculate_component_health(device_type, feature_row, shap_contributions, fai
     Computes component health scores (0-100) and overall device health score.
     Optimized to run at C-speed using list comprehensions and dictionaries.
     """
-    models_dir = r"C:\Users\Dhamodaran G\Desktop\CTS\models"
+    models_dir = paths.MODELS_DIR
     ontology_path = os.path.join(models_dir, "component_ontology.json")
     
     components = []

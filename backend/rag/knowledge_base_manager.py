@@ -5,9 +5,11 @@ import datetime
 import re
 from backend.database import get_db_connection
 
+from backend import paths
+
 class KnowledgeBaseManager:
     def __init__(self):
-        self.doc_dir = r"C:\Users\Dhamodaran G\Desktop\CTS\data\knowledge_base"
+        self.doc_dir = paths.KNOWLEDGE_BASE_DIR
         os.makedirs(self.doc_dir, exist_ok=True)
         
     def upload_document(self, file_name, file_content, device_type, manufacturer, version, hospital_id: str, uploaded_by: str) -> dict:

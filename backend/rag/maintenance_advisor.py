@@ -7,9 +7,11 @@ from sklearn.feature_extraction.text import TfidfVectorizer
 from sklearn.metrics.pairwise import cosine_similarity
 from backend.database import get_db_connection
 
+from backend import paths
+
 class RAGMaintenanceAdvisor:
     def __init__(self):
-        self.data_dir = r"C:\Users\Dhamodaran G\Desktop\CTS\data\raw"
+        self.data_dir = paths.DATA_RAW_DIR
         self.vectorizer = TfidfVectorizer(stop_words='english')
         
         # We will index on demand per hospital_id to enforce multi-tenant isolation

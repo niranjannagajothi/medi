@@ -5,9 +5,11 @@ import json
 import pickle
 import shap
 
+from backend import paths
+
 def run_shap_explainer():
-    processed_dir = r"C:\Users\Dhamodaran G\Desktop\CTS\data\processed"
-    models_dir = r"C:\Users\Dhamodaran G\Desktop\CTS\models"
+    processed_dir = paths.DATA_PROCESSED_DIR
+    models_dir = paths.MODELS_DIR
     
     os.makedirs(models_dir, exist_ok=True)
     

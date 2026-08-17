@@ -12,9 +12,11 @@ from backend.ml.component_health import calculate_component_health
 from backend.ml.root_cause import analyze_root_cause
 from backend.rag.maintenance_advisor import RAGMaintenanceAdvisor
 
+from backend import paths
+
 def precompute_all_device_cache():
-    processed_dir = r"C:\Users\Dhamodaran G\Desktop\CTS\data\processed"
-    models_dir = r"C:\Users\Dhamodaran G\Desktop\CTS\models"
+    processed_dir = paths.DATA_PROCESSED_DIR
+    models_dir = paths.MODELS_DIR
     
     parquet_path = os.path.join(processed_dir, "device_feature_store.parquet")
     if not os.path.exists(parquet_path):
@@ -76,7 +78,7 @@ def precompute_all_device_cache():
     rag_advisor.build_index()
     
     # Load raw failures and maintenance to match component histories
-    data_dir = r"C:\Users\Dhamodaran G\Desktop\CTS\data\raw"
+    data_dir = paths.DATA_RAW_DIR
     df_fail = pd.read_csv(os.path.join(data_dir, "failure_history_cleaned.csv"))
     df_maint = pd.read_csv(os.path.join(data_dir, "maintenance_history_cleaned.csv"))
     
