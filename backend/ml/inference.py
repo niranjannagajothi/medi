@@ -11,10 +11,12 @@ from backend.ml.shap_explainer import explain_prediction
 from backend.knowledge_graph.graph_engine import MedicalDeviceGraphEngine
 from backend.rag.maintenance_advisor import RAGMaintenanceAdvisor
 
+from backend import paths
+
 class MedicalDeviceInferenceEngine:
     def __init__(self):
-        self.data_dir = r"C:\Users\Dhamodaran G\Desktop\CTS\data\raw"
-        self.models_dir = r"C:\Users\Dhamodaran G\Desktop\CTS\models"
+        self.data_dir = paths.DATA_RAW_DIR
+        self.models_dir = paths.MODELS_DIR
         
         self.clf_model = None
         self.rul_model = None

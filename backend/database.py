@@ -5,7 +5,9 @@ import hashlib
 import datetime
 import math
 
-DB_PATH = r"C:\Users\Dhamodaran G\Desktop\CTS\models\aura_intelligence.db"
+from backend import paths
+
+DB_PATH = paths.DB_PATH
 
 def get_db_connection():
     conn = sqlite3.connect(DB_PATH)
@@ -26,6 +28,39 @@ def sanitize_str(val, default="Unknown") -> str:
     if s.lower() in ["nan", "null", "none", ""]:
         return default
     return s
+
+USER_PROFILE_COLUMNS = {
+    "full_name": "TEXT",
+    "job_title": "TEXT",
+    "email": "TEXT",
+    "phone": "TEXT",
+    "is_active": "INTEGER NOT NULL DEFAULT 1",
+    "created_at": "TEXT",
+    "last_login": "TEXT",
+}
+
+ALERT_WORKFLOW_COLUMNS = {
+    "owner_username": "TEXT",
+    "owner_name": "TEXT",
+    "assigned_at": "TEXT",
+    "due_by": "TEXT",
+    "escalation_level": "INTEGER NOT NULL DEFAULT 0",
+    "resolution_note": "TEXT",
+    "downtime_minutes": "INTEGER",
+    "closed_at": "TEXT",
+}
+
+def migrate_alert_columns(cursor):
+    existing = {row["name"] for row in cursor.execute("PRAGMA table_info(alerts)").fetchall()}
+    for column, definition in ALERT_WORKFLOW_COLUMNS.items():
+        if column not in existing:
+            cursor.execute(f"ALTER TABLE alerts ADD COLUMN {column} {definition}")
+
+def migrate_user_columns(cursor):
+    existing = {row["name"] for row in cursor.execute("PRAGMA table_info(users)").fetchall()}
+    for column, definition in USER_PROFILE_COLUMNS.items():
+        if column not in existing:
+            cursor.execute(f"ALTER TABLE users ADD COLUMN {column} {definition}")
 
 def init_db():
     print(f"Initializing SQLite Database at {DB_PATH}...")
@@ -49,9 +84,17 @@ def init_db():
         password_hash TEXT NOT NULL,
         role TEXT NOT NULL,
         department TEXT,
+        full_name TEXT,
+        job_title TEXT,
+        email TEXT,
+        phone TEXT,
+        is_active INTEGER NOT NULL DEFAULT 1,
+        created_at TEXT,
+        last_login TEXT,
         FOREIGN KEY (hospital_id) REFERENCES hospitals(hospital_id)
     );
     """)
+    migrate_user_columns(cursor)
     
     # 3. Departments Table
     cursor.execute("""
@@ -132,6 +175,8 @@ def init_db():
     );
     """)
     
+    migrate_alert_columns(cursor)
+
     # 8. Maintenance Documents Table
     cursor.execute("""
     CREATE TABLE IF NOT EXISTS maintenance_documents (
@@ -185,6 +230,163 @@ def init_db():
     conn.close()
     print("Database initialized successfully.")
 
+DEFAULT_SEED_PASSWORD = os.getenv("AURA_SEED_PASSWORD", "password123")
+
+# Named staff accounts, one workspace per role. Passwords are demo credentials
+# and can be overridden with AURA_SEED_PASSWORD.
+SEED_USERS = [
+    {
+        "hospital_id": "demo-hospital",
+        "username": "a.raman",
+        "role": "HOSPITAL_ADMIN",
+        "department": None,
+        "full_name": "Dr. Anitha Raman",
+        "job_title": "Director, Clinical Engineering",
+        "email": "anitha.raman@demogeneral.health",
+        "phone": "+91 98400 11223",
+    },
+    {
+        "hospital_id": "demo-hospital",
+        "username": "k.mehta",
+        "role": "BIOMEDICAL_ENGINEER",
+        "department": "Intensive Care Unit (ICU)",
+        "full_name": "Karthik Mehta",
+        "job_title": "Senior Biomedical Engineer",
+        "email": "karthik.mehta@demogeneral.health",
+        "phone": "+91 98400 11224",
+    },
+    {
+        "hospital_id": "demo-hospital",
+        "username": "s.iyer",
+        "role": "BIOMEDICAL_ENGINEER",
+        "department": "Radiology Department",
+        "full_name": "Sneha Iyer",
+        "job_title": "Biomedical Engineer, Imaging Systems",
+        "email": "sneha.iyer@demogeneral.health",
+        "phone": "+91 98400 11225",
+    },
+    {
+        "hospital_id": "demo-hospital",
+        "username": "r.thomas",
+        "role": "DEPARTMENT_OPERATOR",
+        "department": "Intensive Care Unit (ICU)",
+        "full_name": "Reena Thomas",
+        "job_title": "ICU Charge Nurse",
+        "email": "reena.thomas@demogeneral.health",
+        "phone": "+91 98400 11226",
+    },
+    {
+        "hospital_id": "demo-hospital",
+        "username": "m.abdullah",
+        "role": "DEPARTMENT_OPERATOR",
+        "department": "Clinical Laboratory",
+        "full_name": "Mohammed Abdullah",
+        "job_title": "Laboratory Operations Supervisor",
+        "email": "mohammed.abdullah@demogeneral.health",
+        "phone": "+91 98400 11227",
+    },
+    {
+        "hospital_id": "demo-hospital",
+        "username": "p.varghese",
+        "role": "RELIABILITY_MANAGER",
+        "department": None,
+        "full_name": "Priya Varghese",
+        "job_title": "Fleet Reliability Manager",
+        "email": "priya.varghese@demogeneral.health",
+        "phone": "+91 98400 11228",
+    },
+    {
+        "hospital_id": "demo-hospital",
+        "username": "d.fernandes",
+        "role": "AUDITOR",
+        "department": None,
+        "full_name": "Daniel Fernandes",
+        "job_title": "Compliance & Safety Auditor",
+        "email": "daniel.fernandes@demogeneral.health",
+        "phone": "+91 98400 11229",
+    },
+    {
+        "hospital_id": "other-hospital",
+        "username": "j.walker",
+        "role": "HOSPITAL_ADMIN",
+        "department": None,
+        "full_name": "Julia Walker",
+        "job_title": "Director of Biomedical Services",
+        "email": "julia.walker@stjude.health",
+        "phone": "+1 415 555 0142",
+    },
+    # Legacy generic logins kept for existing integrations and test fixtures.
+    {
+        "hospital_id": "demo-hospital",
+        "username": "admin",
+        "role": "HOSPITAL_ADMIN",
+        "department": None,
+        "full_name": "Demo Administrator",
+        "job_title": "Hospital Administrator",
+        "email": "admin@demogeneral.health",
+        "phone": None,
+    },
+    {
+        "hospital_id": "demo-hospital",
+        "username": "biomed",
+        "role": "BIOMEDICAL_ENGINEER",
+        "department": None,
+        "full_name": "Demo Biomedical Engineer",
+        "job_title": "Biomedical Engineer",
+        "email": "biomed@demogeneral.health",
+        "phone": None,
+    },
+    {
+        "hospital_id": "demo-hospital",
+        "username": "operator",
+        "role": "DEPARTMENT_OPERATOR",
+        "department": "Intensive Care Unit (ICU)",
+        "full_name": "Demo Department Operator",
+        "job_title": "Department Operator",
+        "email": "operator@demogeneral.health",
+        "phone": None,
+    },
+    {
+        "hospital_id": "demo-hospital",
+        "username": "auditor",
+        "role": "AUDITOR",
+        "department": None,
+        "full_name": "Demo Auditor",
+        "job_title": "Compliance Auditor",
+        "email": "auditor@demogeneral.health",
+        "phone": None,
+    },
+    {
+        "hospital_id": "other-hospital",
+        "username": "admin2",
+        "role": "HOSPITAL_ADMIN",
+        "department": None,
+        "full_name": "Demo Administrator (St. Jude)",
+        "job_title": "Hospital Administrator",
+        "email": "admin2@stjude.health",
+        "phone": None,
+    },
+]
+
+def seed_users(cursor):
+    """Insert the named staff accounts, preserving users created at runtime."""
+    now = datetime.datetime.now().strftime("%Y-%m-%dT%H:%M:%SZ")
+    password_hash = hash_password(DEFAULT_SEED_PASSWORD)
+    for user in SEED_USERS:
+        cursor.execute("SELECT user_id FROM users WHERE username = ?", (user["username"],))
+        if cursor.fetchone():
+            cursor.execute("""
+            UPDATE users SET hospital_id = ?, role = ?, department = ?, full_name = ?, job_title = ?, email = ?, phone = ?
+            WHERE username = ?
+            """, (user["hospital_id"], user["role"], user["department"], user["full_name"],
+                  user["job_title"], user["email"], user["phone"], user["username"]))
+            continue
+        cursor.execute("""
+        INSERT INTO users (hospital_id, username, password_hash, role, department, full_name, job_title, email, phone, is_active, created_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?)
+        """, (user["hospital_id"], user["username"], password_hash, user["role"], user["department"],
+              user["full_name"], user["job_title"], user["email"], user["phone"], now))
+
 def seed_mock_data(conn):
     cursor = conn.cursor()
     
@@ -193,7 +395,6 @@ def seed_mock_data(conn):
     cursor.execute("DELETE FROM alerts")
     cursor.execute("DELETE FROM devices")
     cursor.execute("DELETE FROM departments")
-    cursor.execute("DELETE FROM users")
     cursor.execute("DELETE FROM hospitals")
     
     # Seed Hospitals
@@ -202,18 +403,8 @@ def seed_mock_data(conn):
     cursor.execute("INSERT INTO hospitals (hospital_id, name) VALUES (?, ?)", ("other-hospital", "St. Jude Medical Center"))
         
     # Seed Users
-    print("Seeding mock user roles...")
-    pw = hash_password("password123")
-    cursor.execute("INSERT INTO users (hospital_id, username, password_hash, role, department) VALUES (?, ?, ?, ?, ?)", 
-                   ("demo-hospital", "admin", pw, "HOSPITAL_ADMIN", None))
-    cursor.execute("INSERT INTO users (hospital_id, username, password_hash, role, department) VALUES (?, ?, ?, ?, ?)", 
-                   ("demo-hospital", "biomed", pw, "BIOMEDICAL_ENGINEER", None))
-    cursor.execute("INSERT INTO users (hospital_id, username, password_hash, role, department) VALUES (?, ?, ?, ?, ?)", 
-                   ("demo-hospital", "operator", pw, "DEPARTMENT_OPERATOR", "Intensive Care Unit (ICU)"))
-    cursor.execute("INSERT INTO users (hospital_id, username, password_hash, role, department) VALUES (?, ?, ?, ?, ?)", 
-                   ("demo-hospital", "auditor", pw, "AUDITOR", None))
-    cursor.execute("INSERT INTO users (hospital_id, username, password_hash, role, department) VALUES (?, ?, ?, ?, ?)", 
-                   ("other-hospital", "admin2", pw, "HOSPITAL_ADMIN", None))
+    print("Seeding staff accounts...")
+    seed_users(cursor)
 
     # Seed Departments
     cursor.execute("INSERT INTO departments (hospital_id, name) VALUES (?, ?)", ("demo-hospital", "Intensive Care Unit (ICU)"))
@@ -223,7 +414,7 @@ def seed_mock_data(conn):
 
     # Seed Devices (from device_latest_cache.json)
     print("Seeding devices from cached registry...")
-    cache_path = r"C:\Users\Dhamodaran G\Desktop\CTS\models\device_latest_cache.json"
+    cache_path = paths.DEVICE_CACHE_PATH
     if os.path.exists(cache_path):
         try:
             with open(cache_path, "r") as f:

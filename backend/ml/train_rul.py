@@ -9,10 +9,12 @@ from sklearn.metrics import mean_absolute_error, mean_squared_error, r2_score
 import xgboost as xgb
 import lightgbm as lgb
 
+from backend import paths
+
 def run_train_rul():
-    processed_dir = r"C:\Users\Dhamodaran G\Desktop\CTS\data\processed"
-    models_dir = r"C:\Users\Dhamodaran G\Desktop\CTS\models"
-    artifacts_dir = r"C:\Users\Dhamodaran G\Desktop\CTS\artifacts"
+    processed_dir = paths.DATA_PROCESSED_DIR
+    models_dir = paths.MODELS_DIR
+    artifacts_dir = paths.ARTIFACTS_DIR
     
     os.makedirs(models_dir, exist_ok=True)
     os.makedirs(artifacts_dir, exist_ok=True)

@@ -7,9 +7,11 @@ import json
 
 from backend.ml.inference import MedicalDeviceInferenceEngine
 
+from backend import paths
+
 class SimulatedHospitalConnection:
     def __init__(self):
-        self.state_file = r"C:\Users\Dhamodaran G\Desktop\CTS\models\hospital_connection_state.json"
+        self.state_file = paths.HOSPITAL_STATE_PATH
         self.inference_engine = MedicalDeviceInferenceEngine()
         
     def _get_default_state(self):

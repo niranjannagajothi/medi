@@ -5,10 +5,12 @@ import json
 import uuid
 import datetime
 
+from backend import paths
+
 class DatasetManager:
     def __init__(self):
-        self.upload_dir = r"C:\Users\Dhamodaran G\Desktop\CTS\data\uploaded_datasets"
-        self.registry_path = r"C:\Users\Dhamodaran G\Desktop\CTS\models\dataset_registry.json"
+        self.upload_dir = paths.UPLOADED_DATASETS_DIR
+        self.registry_path = paths.DATASET_REGISTRY_PATH
         os.makedirs(self.upload_dir, exist_ok=True)
         
     def _load_registry(self):
@@ -171,7 +173,7 @@ class DatasetManager:
         self._save_registry(registry)
         
         # Load schema features
-        schema_path = r"C:\Users\Dhamodaran G\Desktop\CTS\models\feature_schema.json"
+        schema_path = paths.FEATURE_SCHEMA_PATH
         with open(schema_path, "r") as sf:
             schema = json.load(sf)
         required_targets = ["Device_ID", "Snapshot_Date", "Device_Type"]

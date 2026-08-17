@@ -9,8 +9,10 @@ from sklearn.linear_model import LogisticRegression
 from sklearn.metrics import accuracy_score, precision_score, recall_score, f1_score, roc_auc_score, confusion_matrix
 from catboost import CatBoostClassifier
 
-ARCHIVE_DIR = r"C:\Users\Dhamodaran G\Downloads\archive (24)"
-MODELS_DIR = r"C:\Users\Dhamodaran G\Desktop\CTS\models"
+from backend import paths
+
+ARCHIVE_DIR = paths.ARCHIVE_DIR
+MODELS_DIR = paths.MODELS_DIR
 
 def load_and_preprocess_archive_dataset(archive_dir=ARCHIVE_DIR):
     dev_path = os.path.join(archive_dir, "devices-1681209661.csv")

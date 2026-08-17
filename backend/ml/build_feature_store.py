@@ -4,10 +4,12 @@ import os
 import time
 import json
 
+from backend import paths
+
 def run_build_feature_store():
-    data_dir = r"C:\Users\Dhamodaran G\Desktop\CTS\data\raw"
-    processed_dir = r"C:\Users\Dhamodaran G\Desktop\CTS\data\processed"
-    artifacts_dir = r"C:\Users\Dhamodaran G\Desktop\CTS\artifacts"
+    data_dir = paths.DATA_RAW_DIR
+    processed_dir = paths.DATA_PROCESSED_DIR
+    artifacts_dir = paths.ARTIFACTS_DIR
     
     os.makedirs(processed_dir, exist_ok=True)
     os.makedirs(artifacts_dir, exist_ok=True)

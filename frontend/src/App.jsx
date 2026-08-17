@@ -11,6 +11,38 @@ import {
 
 const API_BASE = 'http://localhost:8000/api/v1';
 
+// Hospital staff accounts seeded by the backend. Shown on the sign-in screen so
+// a demo reviewer can step into each role without memorising usernames.
+const STAFF_DIRECTORY = [
+  { username: 'a.raman', name: 'Dr. Anitha Raman', title: 'Director of Clinical Engineering', role: 'Hospital Administrator', unit: 'Administration' },
+  { username: 'k.mehta', name: 'Karthik Mehta', title: 'Senior Biomedical Engineer', role: 'Biomedical Engineer', unit: 'ICU' },
+  { username: 's.iyer', name: 'Sneha Iyer', title: 'Biomedical Engineer', role: 'Biomedical Engineer', unit: 'Radiology' },
+  { username: 'r.thomas', name: 'Reena Thomas', title: 'ICU Nurse Manager', role: 'Department Operator', unit: 'ICU' },
+  { username: 'm.abdullah', name: 'Mohammed Abdullah', title: 'Lab Operations Lead', role: 'Department Operator', unit: 'Laboratory' },
+  { username: 'p.varghese', name: 'Priya Varghese', title: 'Reliability Manager', role: 'Reliability Manager', unit: 'Hospital-wide' },
+  { username: 'd.fernandes', name: 'Daniel Fernandes', title: 'Compliance & Safety Auditor', role: 'Compliance Auditor', unit: 'Quality & Safety' },
+];
+
+const PAGE_LABELS = {
+  dashboard: 'Monitoring Dashboard',
+  alerts: 'Alert Queue',
+  explorer: 'Device Explorer',
+  twin: 'Digital Twin View',
+  heatmap: 'Risk Heatmap',
+  prediction: 'Failure Prediction',
+  advisor: 'Maintenance Advisor',
+  explainability: 'Model Benchmarks',
+  hospital_connect: 'Data Connections',
+  dataset_upload: 'Dataset Upload',
+  knowledge_base: 'Knowledge Base',
+  audit_logs: 'Audit Trail',
+  team: 'Team & Access',
+};
+
+function initials(name = '') {
+  return name.split(' ').filter(Boolean).slice(0, 2).map(p => p[0].toUpperCase()).join('');
+}
+
 export default function App() {
   const [activeTab, setActiveTab] = useState('dashboard');
   const [selectedDeviceId, setSelectedDeviceId] = useState('DEV000001');
@@ -46,9 +78,28 @@ export default function App() {
     const saved = localStorage.getItem('aura_user');
     return saved ? JSON.parse(saved) : null;
   });
-  const [loginUsername, setLoginUsername] = useState('admin');
-  const [loginPassword, setLoginPassword] = useState('password123');
+  const [loginUsername, setLoginUsername] = useState('');
+  const [loginPassword, setLoginPassword] = useState('');
   const [loginError, setLoginError] = useState(null);
+  const [loginBusy, setLoginBusy] = useState(false);
+
+  // Role workspace (KPIs, mission, primary actions) served by /workspace/summary
+  const [workspace, setWorkspace] = useState(null);
+
+  // Team & access management (Hospital Admin only)
+  const [teamMembers, setTeamMembers] = useState([]);
+  const [teamRoles, setTeamRoles] = useState([]);
+  const [teamMessage, setTeamMessage] = useState(null);
+  const emptyTeamForm = { username: '', full_name: '', job_title: '', email: '', phone: '', role: 'DEPARTMENT_OPERATOR', department: '', password: '' };
+  const [teamForm, setTeamForm] = useState(emptyTeamForm);
+
+  // Alert ownership workflow
+  const [assignableUsers, setAssignableUsers] = useState([]);
+  const [alertWorkOn, setAlertWorkOn] = useState(null); // { alert_id, mode: 'assign' | 'resolve' }
+  const [assignOwner, setAssignOwner] = useState('');
+  const [assignDueHours, setAssignDueHours] = useState(8);
+  const [resolveNote, setResolveNote] = useState('');
+  const [resolveDowntime, setResolveDowntime] = useState('');
 
   // ==========================================
   // MODULE 1: Live Monitoring / Replay states
@@ -369,6 +420,42 @@ export default function App() {
     }
   }, [currentUser]);
 
+  // Refresh the role-aware session profile so permissions survive a page reload
+  useEffect(() => {
+    if (!localStorage.getItem('aura_token')) return;
+    (async () => {
+      try {
+        const res = await authFetch(`${API_BASE}/auth/me`);
+        if (!res.ok) return;
+        const profile = await res.json();
+        localStorage.setItem('aura_user', JSON.stringify(profile));
+        setCurrentUser(profile);
+      } catch (e) {
+        console.error('Error refreshing session profile:', e);
+      }
+    })();
+  }, []);
+
+  // Role workspace KPIs
+  useEffect(() => {
+    if (currentUser) fetchWorkspaceSummary();
+  }, [currentUser, activeTab]);
+
+  useEffect(() => {
+    if (currentUser && activeTab === 'team') fetchTeam();
+  }, [currentUser, activeTab]);
+
+  useEffect(() => {
+    if (currentUser && activeTab === 'alerts' && can('alert:assign')) fetchAssignableUsers();
+  }, [currentUser, activeTab]);
+
+  // Keep the active page inside what this role is allowed to open
+  useEffect(() => {
+    if (currentUser?.pages && !currentUser.pages.includes(activeTab)) {
+      setActiveTab(currentUser.landing_page || currentUser.pages[0] || 'dashboard');
+    }
+  }, [currentUser, activeTab]);
+
   // Sync selected device details
   useEffect(() => {
     if (currentUser && selectedDeviceId) {
@@ -525,27 +612,42 @@ export default function App() {
   const handleLogin = async (e) => {
     e.preventDefault();
     setLoginError(null);
+    setLoginBusy(true);
     try {
       const res = await fetch(`${API_BASE}/auth/login`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ username: loginUsername, password: loginPassword })
       });
-      
+
       if (!res.ok) {
-        throw new Error("Invalid username or password credentials");
+        let detail = "We couldn't sign you in. Check your username and password.";
+        try {
+          const body = await res.json();
+          if (body?.detail) detail = body.detail;
+        } catch { /* keep default message */ }
+        throw new Error(detail);
       }
-      
+
       const data = await res.json();
       localStorage.setItem('aura_token', data.access_token);
       localStorage.setItem('aura_user', JSON.stringify(data.user));
       setCurrentUser(data.user);
-      
+      setActiveTab(data.user.landing_page || 'dashboard');
+
       // Auto-set the active hospital context
       setHospitalName(data.user.hospital_id === 'demo-hospital' ? 'Demo General Hospital' : 'St. Jude Medical Center');
     } catch (err) {
       setLoginError(err.message);
+    } finally {
+      setLoginBusy(false);
     }
+  };
+
+  const signInAs = (username) => {
+    setLoginUsername(username);
+    setLoginPassword('password123');
+    setLoginError(null);
   };
 
   const handleLogout = () => {
@@ -553,7 +655,110 @@ export default function App() {
     localStorage.removeItem('aura_user');
     setCurrentUser(null);
     setLiveLogs([]);
+    setWorkspace(null);
     setActiveTab('dashboard');
+  };
+
+  const can = (permission) => Boolean(currentUser?.permissions?.includes(permission));
+
+  const fetchWorkspaceSummary = async () => {
+    try {
+      const res = await authFetch(`${API_BASE}/workspace/summary`);
+      if (res.ok) setWorkspace(await res.json());
+    } catch (e) {
+      console.error('Error loading workspace summary:', e);
+    }
+  };
+
+  const fetchTeam = async () => {
+    try {
+      const [usersRes, rolesRes] = await Promise.all([
+        authFetch(`${API_BASE}/admin/users`),
+        authFetch(`${API_BASE}/admin/roles`)
+      ]);
+      if (usersRes.ok) setTeamMembers(await usersRes.json());
+      if (rolesRes.ok) setTeamRoles((await rolesRes.json()).roles || []);
+    } catch (e) {
+      console.error('Error loading team:', e);
+    }
+  };
+
+  const createTeamMember = async (e) => {
+    e.preventDefault();
+    setTeamMessage(null);
+    try {
+      const res = await authFetch(`${API_BASE}/admin/users`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(teamForm)
+      });
+      const body = await res.json();
+      if (!res.ok) throw new Error(body.detail || 'Could not create the account.');
+      setTeamMessage({ tone: 'ok', text: `${teamForm.full_name || teamForm.username} can now sign in.` });
+      setTeamForm(emptyTeamForm);
+      fetchTeam();
+    } catch (err) {
+      setTeamMessage({ tone: 'error', text: err.message });
+    }
+  };
+
+  const setMemberStatus = async (member, isActive) => {
+    try {
+      const res = await authFetch(`${API_BASE}/admin/users/${member.user_id}/status`, {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ is_active: isActive })
+      });
+      if (!res.ok) {
+        const body = await res.json();
+        throw new Error(body.detail || 'Could not update this account.');
+      }
+      fetchTeam();
+    } catch (err) {
+      setTeamMessage({ tone: 'error', text: err.message });
+    }
+  };
+
+  const fetchAssignableUsers = async () => {
+    try {
+      const res = await authFetch(`${API_BASE}/live/assignable-users`);
+      if (res.ok) setAssignableUsers(await res.json());
+    } catch (e) {
+      console.error('Error loading assignable users:', e);
+    }
+  };
+
+  const assignAlert = async (alertId) => {
+    if (!assignOwner) return;
+    await authFetch(`${API_BASE}/live/alerts/${alertId}/assign`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ owner_username: assignOwner, due_hours: Number(assignDueHours) || 8 })
+    });
+    setAlertWorkOn(null);
+    setAssignOwner('');
+    fetchAlerts();
+  };
+
+  const escalateAlert = async (alertId) => {
+    await authFetch(`${API_BASE}/live/alerts/${alertId}/escalate`, { method: 'POST' });
+    fetchAlerts();
+  };
+
+  const resolveAlertWithNote = async (alertId) => {
+    if (!resolveNote.trim()) return;
+    await authFetch(`${API_BASE}/live/alerts/${alertId}/resolve`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        resolution_note: resolveNote,
+        downtime_minutes: resolveDowntime === '' ? null : Number(resolveDowntime)
+      })
+    });
+    setAlertWorkOn(null);
+    setResolveNote('');
+    setResolveDowntime('');
+    fetchAlerts();
   };
 
   const fetchDeviceList = async () => {
@@ -659,7 +864,7 @@ export default function App() {
 
   const fetchAuditLogs = async () => {
     try {
-      if (currentUser?.role === 'HOSPITAL_ADMIN' || currentUser?.role === 'AUDITOR') {
+      if (can('audit:view')) {
         const res = await authFetch(`${API_BASE}/audit/logs`);
         const data = await res.json();
         setAuditLogs(data);
@@ -1155,63 +1360,111 @@ export default function App() {
     return '#10b981';
   };
 
-  // Role-Based Navigation Visibility
-  const hasPageAccess = (tab) => {
-    if (!currentUser) return false;
-    if (tab === 'graph') return false; // Root Cause Graph page disabled across all roles
-    return true;
-  };
+  // Role-Based Navigation Visibility — driven by the server-side permission matrix
+  const hasPageAccess = (tab) => Boolean(currentUser?.pages?.includes(tab));
 
-  // Render Login overlay if unauthenticated
+  // Render sign-in screen if unauthenticated
   if (!currentUser) {
     return (
-      <div className="app-container" style={{ justifyContent: 'center', alignItems: 'center', height: '100vh', background: 'radial-gradient(circle at center, #f8fafc 0%, #cbd5e1 100%)' }}>
-        <div className="glass-card" style={{ width: '460px', padding: '40px', display: 'flex', flexDirection: 'column', gap: '25px', border: '1px solid var(--border-color)', boxShadow: '0 10px 25px -5px rgba(0,0,0,0.05)' }}>
-          <div style={{ textAlign: 'center' }}>
-            <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', gap: '10px', marginBottom: '10px' }}>
-              <Activity size={36} color="#3b82f6" />
-              <span style={{ fontSize: '1.6em', fontWeight: 800, letterSpacing: '0.05em', color: 'var(--text-primary)' }}>AURA INTELLIGENCE</span>
+      <div style={{ display: 'flex', minHeight: '100vh', background: '#f1f5f9' }}>
+        {/* Left: hospital story panel */}
+        <div style={{ flex: '1 1 46%', background: 'linear-gradient(160deg, #0f2547 0%, #1d4ed8 100%)', color: '#e2e8f0', padding: '56px 52px', display: 'flex', flexDirection: 'column', justifyContent: 'space-between' }}>
+          <div style={{ display: 'flex', alignItems: 'center', gap: '12px' }}>
+            <Activity size={30} color="#93c5fd" />
+            <div>
+              <div style={{ fontSize: '1.15em', fontWeight: 700, letterSpacing: '0.04em' }}>AURA</div>
+              <div style={{ fontSize: '0.72em', color: '#93c5fd' }}>Clinical Equipment Reliability</div>
             </div>
-            <span style={{ fontSize: '0.85em', color: 'var(--text-muted)' }}>AI-Powered Reliability & Multi-Tenant Predictive Platform</span>
           </div>
 
-          {loginError && (
-            <div style={{ background: 'rgba(239,68,68,0.1)', border: '1px solid rgba(239,68,68,0.2)', color: '#dc2626', padding: '12px', borderRadius: '6px', fontSize: '0.85em', textAlign: 'center' }}>
-              {loginError}
+          <div style={{ maxWidth: '440px' }}>
+            <h1 style={{ fontSize: '2.1em', lineHeight: 1.25, margin: '0 0 16px 0', color: '#ffffff' }}>
+              Keep every ventilator, pump and scanner ready for the next patient.
+            </h1>
+            <p style={{ margin: 0, fontSize: '0.98em', color: '#cbd5e1', lineHeight: 1.6 }}>
+              Engineering, nursing, reliability and compliance teams share one record of what is failing,
+              who owns the fix, and when it is due back in service.
+            </p>
+            <div style={{ display: 'flex', gap: '28px', marginTop: '36px' }}>
+              <div>
+                <div style={{ fontSize: '1.6em', fontWeight: 700, color: '#ffffff' }}>7</div>
+                <div style={{ fontSize: '0.75em', color: '#93c5fd' }}>Staff accounts</div>
+              </div>
+              <div>
+                <div style={{ fontSize: '1.6em', fontWeight: 700, color: '#ffffff' }}>5</div>
+                <div style={{ fontSize: '0.75em', color: '#93c5fd' }}>Distinct workspaces</div>
+              </div>
+              <div>
+                <div style={{ fontSize: '1.6em', fontWeight: 700, color: '#ffffff' }}>24/7</div>
+                <div style={{ fontSize: '0.75em', color: '#93c5fd' }}>Device monitoring</div>
+              </div>
             </div>
-          )}
+          </div>
 
-          <form onSubmit={handleLogin} style={{ display: 'flex', flexDirection: 'column', gap: '15px' }}>
-            <div style={{ display: 'flex', flexDirection: 'column', gap: '6px' }}>
-              <label style={{ fontSize: '0.8em', color: 'var(--text-secondary)', fontWeight: 500 }}>Username</label>
-              <input type="text" value={loginUsername} style={{ background: 'var(--input-bg)', border: '1px solid var(--input-border)', color: 'var(--text-primary)' }} onChange={e => setLoginUsername(e.target.value)} required />
-            </div>
-            <div style={{ display: 'flex', flexDirection: 'column', gap: '6px' }}>
-              <label style={{ fontSize: '0.8em', color: 'var(--text-secondary)', fontWeight: 500 }}>Password</label>
-              <input type="password" value={loginPassword} style={{ background: 'var(--input-bg)', border: '1px solid var(--input-border)', color: 'var(--text-primary)' }} onChange={e => setLoginPassword(e.target.value)} required />
-            </div>
-            
-            <button className="primary" type="submit" style={{ padding: '12px', fontWeight: 'bold', fontSize: '1em', marginTop: '10px' }}>
-              Authenticate & Login
-            </button>
-          </form>
+          <div style={{ fontSize: '0.75em', color: '#93c5fd' }}>
+            Every sign-in and maintenance action is written to the hospital audit trail.
+          </div>
+        </div>
 
-          {/* Quick Profiles */}
-          <div style={{ borderTop: '1px solid var(--border-light)', paddingTop: '20px' }}>
-            <span style={{ fontSize: '0.75em', color: 'var(--text-muted)', display: 'block', marginBottom: '10px', fontWeight: 600 }}>QUICK ACCESS DEMO PROFILES</span>
-            <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '10px', fontSize: '0.8em' }}>
-              <button style={{ padding: '8px', background: '#f8fafc', border: '1px solid var(--border-color)', borderRadius: '6px', color: '#2563eb', cursor: 'pointer', textAlign: 'left', fontWeight: 500 }} onClick={() => { setLoginUsername('admin'); setLoginPassword('password123'); }}>
-                👑 Admin
+        {/* Right: sign-in form */}
+        <div style={{ flex: '1 1 54%', display: 'flex', alignItems: 'center', justifyContent: 'center', padding: '40px' }}>
+          <div style={{ width: '100%', maxWidth: '480px', display: 'flex', flexDirection: 'column', gap: '22px' }}>
+            <div>
+              <h2 style={{ margin: 0, fontSize: '1.55em', color: 'var(--text-primary)' }}>Sign in to your hospital workspace</h2>
+              <p style={{ margin: '8px 0 0 0', color: 'var(--text-muted)', fontSize: '0.9em' }}>
+                Use the credentials issued by your clinical engineering department.
+              </p>
+            </div>
+
+            {loginError && (
+              <div style={{ background: 'rgba(239,68,68,0.08)', border: '1px solid rgba(239,68,68,0.25)', color: '#b91c1c', padding: '12px 14px', borderRadius: '8px', fontSize: '0.86em' }}>
+                {loginError}
+              </div>
+            )}
+
+            <form onSubmit={handleLogin} style={{ display: 'flex', flexDirection: 'column', gap: '14px' }}>
+              <div style={{ display: 'flex', flexDirection: 'column', gap: '6px' }}>
+                <label style={{ fontSize: '0.82em', color: 'var(--text-secondary)', fontWeight: 600 }}>Staff username</label>
+                <input type="text" autoComplete="username" placeholder="e.g. k.mehta" value={loginUsername} style={{ background: 'var(--input-bg)', border: '1px solid var(--input-border)', color: 'var(--text-primary)', padding: '12px' }} onChange={e => setLoginUsername(e.target.value)} required />
+              </div>
+              <div style={{ display: 'flex', flexDirection: 'column', gap: '6px' }}>
+                <label style={{ fontSize: '0.82em', color: 'var(--text-secondary)', fontWeight: 600 }}>Password</label>
+                <input type="password" autoComplete="current-password" value={loginPassword} style={{ background: 'var(--input-bg)', border: '1px solid var(--input-border)', color: 'var(--text-primary)', padding: '12px' }} onChange={e => setLoginPassword(e.target.value)} required />
+              </div>
+              <button className="primary" type="submit" disabled={loginBusy} style={{ padding: '13px', fontWeight: 600, fontSize: '1em', marginTop: '6px' }}>
+                {loginBusy ? 'Signing in…' : 'Sign in'}
               </button>
-              <button style={{ padding: '8px', background: '#f8fafc', border: '1px solid var(--border-color)', borderRadius: '6px', color: '#4f46e5', cursor: 'pointer', textAlign: 'left', fontWeight: 500 }} onClick={() => { setLoginUsername('biomed'); setLoginPassword('password123'); }}>
-                🔧 BioMed Eng
-              </button>
-              <button style={{ padding: '8px', background: '#f8fafc', border: '1px solid var(--border-color)', borderRadius: '6px', color: '#ea580c', cursor: 'pointer', textAlign: 'left', fontWeight: 500 }} onClick={() => { setLoginUsername('operator'); setLoginPassword('password123'); }}>
-                🏥 Operator
-              </button>
-              <button style={{ padding: '8px', background: '#f8fafc', border: '1px solid var(--border-color)', borderRadius: '6px', color: '#059669', cursor: 'pointer', textAlign: 'left', fontWeight: 500 }} onClick={() => { setLoginUsername('auditor'); setLoginPassword('password123'); }}>
-                📄 Auditor
-              </button>
+              <span style={{ fontSize: '0.76em', color: 'var(--text-muted)' }}>
+                Accounts lock for five minutes after five failed attempts.
+              </span>
+            </form>
+
+            <div style={{ borderTop: '1px solid var(--border-light)', paddingTop: '18px' }}>
+              <span style={{ fontSize: '0.75em', color: 'var(--text-muted)', display: 'block', marginBottom: '10px', fontWeight: 600, letterSpacing: '0.04em' }}>
+                DEMO STAFF DIRECTORY — SELECT A PERSON TO PREFILL
+              </span>
+              <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '10px' }}>
+                {STAFF_DIRECTORY.map(person => (
+                  <button
+                    key={person.username}
+                    type="button"
+                    onClick={() => signInAs(person.username)}
+                    style={{
+                      display: 'flex', gap: '10px', alignItems: 'center', textAlign: 'left', cursor: 'pointer',
+                      padding: '10px 12px', borderRadius: '10px', background: loginUsername === person.username ? '#eff6ff' : '#ffffff',
+                      border: `1px solid ${loginUsername === person.username ? '#3b82f6' : 'var(--border-color)'}`
+                    }}
+                  >
+                    <span style={{ width: '32px', height: '32px', flexShrink: 0, borderRadius: '50%', background: '#1d4ed8', color: '#fff', fontSize: '0.72em', fontWeight: 700, display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
+                      {initials(person.name)}
+                    </span>
+                    <span style={{ overflow: 'hidden' }}>
+                      <span style={{ display: 'block', fontSize: '0.82em', fontWeight: 600, color: 'var(--text-primary)' }}>{person.name}</span>
+                      <span style={{ display: 'block', fontSize: '0.72em', color: 'var(--text-muted)' }}>{person.role} • {person.unit}</span>
+                    </span>
+                  </button>
+                ))}
+              </div>
             </div>
           </div>
         </div>
@@ -1434,8 +1687,20 @@ export default function App() {
             </button>
           )}
           
-          {/* NEW EXTENSIONS SECTION */}
-          <div style={{ margin: '15px 0 5px 12px', fontSize: '0.7em', color: 'var(--text-muted)', fontWeight: 600, letterSpacing: '0.05em' }}>NEW EXTENSIONS</div>
+          {/* ADMINISTRATION SECTION */}
+          {(hasPageAccess('hospital_connect') || hasPageAccess('dataset_upload') || hasPageAccess('knowledge_base') || hasPageAccess('audit_logs') || hasPageAccess('team')) && (
+            <div style={{ margin: '15px 0 5px 12px', fontSize: '0.7em', color: 'var(--text-muted)', fontWeight: 600, letterSpacing: '0.05em' }}>GOVERNANCE & DATA</div>
+          )}
+
+          {hasPageAccess('team') && (
+            <button
+              style={{ display: 'flex', alignItems: 'center', gap: '12px', background: activeTab === 'team' ? 'var(--active-tab-bg)' : 'transparent', color: activeTab === 'team' ? 'var(--active-tab-color)' : 'var(--inactive-tab-color)', border: 'none', textAlign: 'left', cursor: 'pointer', padding: '12px 16px', borderRadius: '8px', fontWeight: 500 }}
+              onClick={() => setActiveTab('team')}
+            >
+              <Users size={18} />
+              <span>Team &amp; Access</span>
+            </button>
+          )}
           
           {hasPageAccess('hospital_connect') && (
             <button 
@@ -1474,24 +1739,28 @@ export default function App() {
             </button>
           )}
           
-          <button 
-            style={{ display: 'flex', alignItems: 'center', gap: '12px', background: activeTab === 'alerts' ? 'var(--active-tab-bg)' : 'transparent', color: activeTab === 'alerts' ? '#ef4444' : 'var(--inactive-tab-color)', border: 'none', textAlign: 'left', cursor: 'pointer', padding: '12px 16px', borderRadius: '8px', fontWeight: 500 }}
-            onClick={() => setActiveTab('alerts')}
-          >
-            <AlertOctagon size={18} />
-            <span>Fleet Alerts <span style={{ background: '#ef4444', color: 'white', fontSize: '0.8em', padding: '1px 6px', borderRadius: '4px', marginLeft: '5px' }}>{alerts.filter(a => a.status === 'active').length}</span></span>
-          </button>
+          {hasPageAccess('alerts') && (
+            <button 
+              style={{ display: 'flex', alignItems: 'center', gap: '12px', background: activeTab === 'alerts' ? 'var(--active-tab-bg)' : 'transparent', color: activeTab === 'alerts' ? '#ef4444' : 'var(--inactive-tab-color)', border: 'none', textAlign: 'left', cursor: 'pointer', padding: '12px 16px', borderRadius: '8px', fontWeight: 500 }}
+              onClick={() => setActiveTab('alerts')}
+            >
+              <AlertOctagon size={18} />
+              <span>{can('alert:resolve') ? 'My Alert Queue' : 'Alert Queue'} <span style={{ background: '#ef4444', color: 'white', fontSize: '0.8em', padding: '1px 6px', borderRadius: '4px', marginLeft: '5px' }}>{alerts.filter(a => a.status === 'active').length}</span></span>
+            </button>
+          )}
         </div>
 
         {/* User Card */}
         <div style={{ padding: '20px', borderTop: '1px solid var(--border-light)', display: 'flex', gap: '10px', alignItems: 'center', justifyContent: 'space-between' }}>
           <div style={{ display: 'flex', gap: '10px', alignItems: 'center' }}>
-            <div style={{ width: '38px', height: '38px', background: '#3b82f6', color: '#ffffff', borderRadius: '50%', display: 'flex', alignItems: 'center', justifyContent: 'center', fontWeight: 'bold' }}>
-              {currentUser.username[0].toUpperCase()}
+            <div style={{ width: '38px', height: '38px', background: '#1d4ed8', color: '#ffffff', borderRadius: '50%', display: 'flex', alignItems: 'center', justifyContent: 'center', fontWeight: 'bold', fontSize: '0.8em' }}>
+              {initials(currentUser.full_name || currentUser.username)}
             </div>
             <div>
-              <div style={{ fontSize: '0.9em', fontWeight: 500, color: 'var(--text-primary)' }}>{currentUser.username}</div>
-              <div style={{ fontSize: '0.7em', color: 'var(--text-muted)' }}>{currentUser.role.replace('_', ' ')}</div>
+              <div style={{ fontSize: '0.9em', fontWeight: 600, color: 'var(--text-primary)' }}>{currentUser.full_name || currentUser.username}</div>
+              <div style={{ fontSize: '0.7em', color: 'var(--text-muted)' }}>
+                {currentUser.role_label || currentUser.role.replace(/_/g, ' ')}{currentUser.department ? ` • ${currentUser.department}` : ''}
+              </div>
             </div>
           </div>
           <button style={{ background: 'none', border: 'none', cursor: 'pointer', color: '#ef4444', fontSize: '0.85em', fontWeight: 'bold' }} onClick={handleLogout}>
@@ -1502,6 +1771,53 @@ export default function App() {
 
       {/* Main Panel */}
       <div className="main-content">
+
+        {/* Role workspace banner — who you are, what you own, what to do next */}
+        {workspace && (
+          <div className="glass-card" style={{ marginBottom: '22px', padding: '20px 24px', display: 'flex', flexDirection: 'column', gap: '16px' }}>
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', gap: '20px', flexWrap: 'wrap' }}>
+              <div>
+                <div style={{ fontSize: '1.25em', fontWeight: 700, color: 'var(--text-primary)' }}>
+                  {(() => {
+                    const hour = new Date().getHours();
+                    const part = hour < 12 ? 'Good morning' : hour < 17 ? 'Good afternoon' : 'Good evening';
+                    return `${part}, ${(currentUser.full_name || currentUser.username).split(' ').slice(-1)[0]}`;
+                  })()}
+                </div>
+                <div style={{ fontSize: '0.85em', color: 'var(--text-secondary)', marginTop: '4px' }}>
+                  {currentUser.job_title || workspace.role_label}
+                  {currentUser.department ? ` · ${currentUser.department}` : ''} · {hospitalName}
+                </div>
+                <div style={{ fontSize: '0.82em', color: 'var(--text-muted)', marginTop: '6px', maxWidth: '620px' }}>{workspace.mission}</div>
+              </div>
+              <div style={{ display: 'flex', gap: '8px', flexWrap: 'wrap', alignItems: 'center' }}>
+                {currentUser.read_only && (
+                  <span className="badge badge-low" style={{ alignSelf: 'center' }}>Read-only access</span>
+                )}
+                {(workspace.primary_actions || []).map(action => (
+                  <button
+                    key={action.page + action.label}
+                    className="primary"
+                    style={{ fontSize: '0.8em', padding: '9px 14px' }}
+                    onClick={() => setActiveTab(action.page)}
+                  >
+                    {action.label}
+                  </button>
+                ))}
+              </div>
+            </div>
+
+            <div style={{ display: 'grid', gridTemplateColumns: `repeat(${Math.max(1, (workspace.kpis || []).length)}, minmax(0, 1fr))`, gap: '14px' }}>
+              {(workspace.kpis || []).map(kpi => (
+                <div key={kpi.key} style={{ border: '1px solid var(--border-light)', borderRadius: '10px', padding: '12px 14px', background: 'var(--input-bg)' }}>
+                  <div style={{ fontSize: '0.72em', color: 'var(--text-muted)', textTransform: 'uppercase', letterSpacing: '0.04em' }}>{kpi.label}</div>
+                  <div style={{ fontSize: '1.35em', fontWeight: 700, color: 'var(--text-primary)', marginTop: '4px' }}>{String(kpi.value)}</div>
+                </div>
+              ))}
+            </div>
+          </div>
+        )}
+
         
         {/* MONITORING DASHBOARD */}
         {activeTab === 'dashboard' && (
@@ -2997,8 +3313,18 @@ export default function App() {
           <div style={{ display: 'flex', flexDirection: 'column', gap: '20px' }}>
             <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
               <div>
-                <h1 style={{ margin: 0, fontSize: '2em' }}>Fleet Real-Time Alerts</h1>
-                <p style={{ margin: '5px 0 0 0', color: '#94a3b8' }}>Active risks requiring biomedical response</p>
+                <h1 style={{ margin: 0, fontSize: '2em' }}>
+                  {currentUser.role === 'DEPARTMENT_OPERATOR' ? `${currentUser.department || 'Department'} Alerts` : 'Alert Queue'}
+                </h1>
+                <p style={{ margin: '5px 0 0 0', color: '#94a3b8' }}>
+                  {currentUser.read_only
+                    ? 'Alert history and ownership record — read-only.'
+                    : currentUser.role === 'DEPARTMENT_OPERATOR'
+                      ? 'Equipment risks in your department. Acknowledge so engineering picks them up.'
+                      : can('alert:resolve')
+                        ? 'Take ownership, work the fix and close the loop with a resolution note.'
+                        : 'Assign owners, set SLA due times and escalate what is slipping.'}
+                </p>
               </div>
               <span className="badge badge-critical" style={{ fontSize: '0.9em' }}>
                 {alerts.filter(a => a.status === 'active').length} Active Alerts
@@ -3051,12 +3377,23 @@ export default function App() {
                 <div 
                   key={dev.alert_id}
                   className={`glass-card ${dev.risk_level === 'CRITICAL' ? 'risk-critical' : 'risk-high'}`}
-                  style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', padding: '18px 25px', opacity: dev.status === 'acknowledged' ? 0.6 : 1 }}
+                  style={{ display: 'flex', flexWrap: 'wrap', justifyContent: 'space-between', alignItems: 'center', padding: '18px 25px', opacity: dev.status === 'resolved' ? 0.6 : 1 }}
                 >
                   <div style={{ display: 'flex', gap: '20px', alignItems: 'center' }}>
                     <AlertIcon size={24} color={dev.risk_level === 'CRITICAL' ? '#ef4444' : '#f97316'} />
                     <div>
                       <div style={{ fontWeight: 'bold', fontSize: '1.1em' }}>{dev.device_id} ({dev.department})</div>
+                      <div style={{ fontSize: '0.8em', color: '#94a3b8', marginTop: '4px' }}>
+                        Owner: {dev.owner_name || 'Unassigned'}
+                        {dev.due_by ? ` • Due ${new Date(dev.due_by).toLocaleString()}` : ''}
+                        {dev.escalation_level ? ` • Escalation L${dev.escalation_level}` : ''}
+                        {dev.status ? ` • Status: ${dev.status}` : ''}
+                      </div>
+                      {dev.resolution_note && (
+                        <div style={{ fontSize: '0.8em', color: '#10b981', marginTop: '4px' }}>
+                          Closed: {dev.resolution_note}{dev.downtime_minutes != null ? ` (${dev.downtime_minutes} min downtime)` : ''}
+                        </div>
+                      )}
                       <div style={{ fontSize: '0.85em', color: '#cbd5e1', marginTop: '4px' }}>
                         Issue: {dev.root_cause || dev.primary_root_cause || "Component Failure Risk"} • Prob: {Math.round((dev.failure_probability || 0.85)*100)}% • Anomaly Score: {dev.anomaly_score || 75.0}%
                       </div>
@@ -3079,14 +3416,68 @@ export default function App() {
                         Ask AI Advisor
                       </button>
                     )}
-                    {dev.status === 'active' ? (
+                    {can('alert:acknowledge') && dev.status === 'active' && (
                       <button className="primary" style={{ background: '#10b981' }} onClick={() => acknowledgeAlert(dev.alert_id)}>
                         Acknowledge
                       </button>
-                    ) : (
-                      <span style={{ fontSize: '0.85em', color: '#64748b', fontWeight: 600 }}>✓ Acknowledged</span>
+                    )}
+                    {can('alert:assign') && dev.status !== 'resolved' && (
+                      <button className="primary" style={{ background: '#0ea5e9' }} onClick={() => { setAlertWorkOn({ alert_id: dev.alert_id, mode: 'assign' }); setAssignOwner(dev.owner_username || ''); }}>
+                        {dev.owner_name ? 'Reassign' : 'Assign owner'}
+                      </button>
+                    )}
+                    {can('alert:escalate') && dev.status !== 'resolved' && (
+                      <button className="primary" style={{ background: '#f97316' }} onClick={() => escalateAlert(dev.alert_id)}>
+                        Escalate
+                      </button>
+                    )}
+                    {can('alert:resolve') && dev.status !== 'resolved' && (
+                      <button className="primary" style={{ background: '#4f46e5' }} onClick={() => setAlertWorkOn({ alert_id: dev.alert_id, mode: 'resolve' })}>
+                        Close with note
+                      </button>
+                    )}
+                    {dev.status === 'resolved' && (
+                      <span style={{ fontSize: '0.85em', color: '#10b981', fontWeight: 600 }}>✓ Closed</span>
+                    )}
+                    {currentUser.read_only && (
+                      <span style={{ fontSize: '0.8em', color: '#64748b' }}>Read-only</span>
                     )}
                   </div>
+
+                  {alertWorkOn?.alert_id === dev.alert_id && alertWorkOn.mode === 'assign' && (
+                    <div style={{ width: '100%', marginTop: '14px', paddingTop: '14px', borderTop: '1px solid var(--border-light)', display: 'flex', gap: '10px', alignItems: 'flex-end', flexWrap: 'wrap' }}>
+                      <div style={{ display: 'flex', flexDirection: 'column', gap: '4px' }}>
+                        <label style={{ fontSize: '0.75em', color: 'var(--text-muted)' }}>Accountable engineer</label>
+                        <select value={assignOwner} onChange={e => setAssignOwner(e.target.value)} style={{ minWidth: '240px' }}>
+                          <option value="">Select an engineer…</option>
+                          {assignableUsers.map(u => (
+                            <option key={u.username} value={u.username}>{u.full_name} — {u.department || 'Hospital-wide'}</option>
+                          ))}
+                        </select>
+                      </div>
+                      <div style={{ display: 'flex', flexDirection: 'column', gap: '4px' }}>
+                        <label style={{ fontSize: '0.75em', color: 'var(--text-muted)' }}>Due within (hours)</label>
+                        <input type="number" min="1" value={assignDueHours} onChange={e => setAssignDueHours(e.target.value)} style={{ width: '120px' }} />
+                      </div>
+                      <button className="primary" onClick={() => assignAlert(dev.alert_id)}>Confirm assignment</button>
+                      <button onClick={() => setAlertWorkOn(null)} style={{ background: 'none', border: '1px solid var(--border-color)', borderRadius: '6px', padding: '9px 14px', cursor: 'pointer' }}>Cancel</button>
+                    </div>
+                  )}
+
+                  {alertWorkOn?.alert_id === dev.alert_id && alertWorkOn.mode === 'resolve' && (
+                    <div style={{ width: '100%', marginTop: '14px', paddingTop: '14px', borderTop: '1px solid var(--border-light)', display: 'flex', gap: '10px', alignItems: 'flex-end', flexWrap: 'wrap' }}>
+                      <div style={{ display: 'flex', flexDirection: 'column', gap: '4px', flex: 1, minWidth: '280px' }}>
+                        <label style={{ fontSize: '0.75em', color: 'var(--text-muted)' }}>What did you do to fix it?</label>
+                        <input type="text" value={resolveNote} placeholder="Replaced battery pack, verified 30 min run-down test" onChange={e => setResolveNote(e.target.value)} />
+                      </div>
+                      <div style={{ display: 'flex', flexDirection: 'column', gap: '4px' }}>
+                        <label style={{ fontSize: '0.75em', color: 'var(--text-muted)' }}>Downtime (min)</label>
+                        <input type="number" min="0" value={resolveDowntime} onChange={e => setResolveDowntime(e.target.value)} style={{ width: '120px' }} />
+                      </div>
+                      <button className="primary" onClick={() => resolveAlertWithNote(dev.alert_id)}>Close alert</button>
+                      <button onClick={() => setAlertWorkOn(null)} style={{ background: 'none', border: '1px solid var(--border-color)', borderRadius: '6px', padding: '9px 14px', cursor: 'pointer' }}>Cancel</button>
+                    </div>
+                  )}
                 </div>
               ))}
               {alerts.length === 0 && (
@@ -3582,6 +3973,94 @@ export default function App() {
                 <input type="text" placeholder="e.g. How to replace the ventilator battery?" value={kbChatInput} onChange={e => setKbChatInput(e.target.value)} onKeyDown={e => e.key === 'Enter' && sendKbChatMessage()} style={{ flex: 1 }} />
                 <button className="primary" onClick={sendKbChatMessage} disabled={kbChatLoading}>Query RAG</button>
               </div>
+            </div>
+          </div>
+        )}
+
+        {/* ==========================================
+            Team & Access (Hospital Admin)
+            ========================================== */}
+        {activeTab === 'team' && (
+          <div style={{ display: 'flex', flexDirection: 'column', gap: '20px' }}>
+            <div>
+              <h1 style={{ margin: 0, fontSize: '2em' }}>Team &amp; Access</h1>
+              <p style={{ margin: '5px 0 0 0', color: '#94a3b8' }}>
+                Who can sign in to {hospitalName}, what they are responsible for, and whether their account is active.
+              </p>
+            </div>
+
+            {teamMessage && (
+              <div className="glass-card" style={{ padding: '12px 16px', color: teamMessage.tone === 'ok' ? '#047857' : '#b91c1c', fontSize: '0.88em' }}>
+                {teamMessage.text}
+              </div>
+            )}
+
+            <div style={{ display: 'grid', gridTemplateColumns: '1.6fr 1fr', gap: '20px', alignItems: 'start' }}>
+              <div className="glass-card" style={{ padding: '0', overflow: 'hidden' }}>
+                <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: '0.86em' }}>
+                  <thead>
+                    <tr style={{ textAlign: 'left', background: 'var(--input-bg)' }}>
+                      <th style={{ padding: '12px 16px' }}>Staff member</th>
+                      <th style={{ padding: '12px 16px' }}>Responsibility</th>
+                      <th style={{ padding: '12px 16px' }}>Last sign-in</th>
+                      <th style={{ padding: '12px 16px' }}>Account</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {teamMembers.map(member => (
+                      <tr key={member.user_id} style={{ borderTop: '1px solid var(--border-light)' }}>
+                        <td style={{ padding: '12px 16px' }}>
+                          <div style={{ fontWeight: 600 }}>{member.full_name}</div>
+                          <div style={{ color: 'var(--text-muted)', fontSize: '0.85em' }}>{member.username} · {member.email || 'no email on file'}</div>
+                        </td>
+                        <td style={{ padding: '12px 16px' }}>
+                          <div>{member.job_title || member.role.replace(/_/g, ' ')}</div>
+                          <div style={{ color: 'var(--text-muted)', fontSize: '0.85em' }}>{member.department || 'Hospital-wide'}</div>
+                        </td>
+                        <td style={{ padding: '12px 16px', color: 'var(--text-muted)' }}>
+                          {member.last_login ? new Date(member.last_login).toLocaleString() : 'Never'}
+                        </td>
+                        <td style={{ padding: '12px 16px' }}>
+                          <button
+                            onClick={() => setMemberStatus(member, !member.is_active)}
+                            style={{ display: 'flex', alignItems: 'center', gap: '6px', background: 'none', border: '1px solid var(--border-color)', borderRadius: '6px', padding: '6px 10px', cursor: 'pointer', color: member.is_active ? '#047857' : '#b91c1c' }}
+                          >
+                            {member.is_active ? <ToggleRight size={16} /> : <ToggleLeft size={16} />}
+                            {member.is_active ? 'Active' : 'Suspended'}
+                          </button>
+                        </td>
+                      </tr>
+                    ))}
+                    {teamMembers.length === 0 && (
+                      <tr><td colSpan={4} style={{ padding: '24px', textAlign: 'center', color: 'var(--text-muted)' }}>No staff accounts yet.</td></tr>
+                    )}
+                  </tbody>
+                </table>
+              </div>
+
+              <form className="glass-card" onSubmit={createTeamMember} style={{ display: 'flex', flexDirection: 'column', gap: '10px' }}>
+                <h3 style={{ margin: 0 }}>Add a staff member</h3>
+                <p style={{ margin: 0, fontSize: '0.8em', color: 'var(--text-muted)' }}>
+                  They receive access to only the workspace their role needs.
+                </p>
+                <input placeholder="Full name" value={teamForm.full_name} onChange={e => setTeamForm({ ...teamForm, full_name: e.target.value })} required />
+                <input placeholder="Username (e.g. s.iyer)" value={teamForm.username} onChange={e => setTeamForm({ ...teamForm, username: e.target.value })} required />
+                <input placeholder="Job title" value={teamForm.job_title} onChange={e => setTeamForm({ ...teamForm, job_title: e.target.value })} />
+                <input placeholder="Work email" type="email" value={teamForm.email} onChange={e => setTeamForm({ ...teamForm, email: e.target.value })} />
+                <select value={teamForm.role} onChange={e => setTeamForm({ ...teamForm, role: e.target.value })}>
+                  {(teamRoles.length ? teamRoles : ['HOSPITAL_ADMIN', 'BIOMEDICAL_ENGINEER', 'DEPARTMENT_OPERATOR', 'RELIABILITY_MANAGER', 'AUDITOR']).map(role => (
+                    <option key={role} value={role}>{role.replace(/_/g, ' ')}</option>
+                  ))}
+                </select>
+                <input
+                  placeholder={teamForm.role === 'DEPARTMENT_OPERATOR' ? 'Department (required)' : 'Department (optional)'}
+                  value={teamForm.department}
+                  onChange={e => setTeamForm({ ...teamForm, department: e.target.value })}
+                  required={teamForm.role === 'DEPARTMENT_OPERATOR'}
+                />
+                <input placeholder="Temporary password (min 8 characters)" type="password" value={teamForm.password} onChange={e => setTeamForm({ ...teamForm, password: e.target.value })} required minLength={8} />
+                <button className="primary" type="submit" style={{ padding: '11px' }}>Create account</button>
+              </form>
             </div>
           </div>
         )}

@@ -12,6 +12,12 @@ sys.path.append(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(
 
 from backend.database import init_db, get_db_connection, hash_password, log_audit_event
 from backend.services.auth import get_current_user, RoleChecker, verify_tenant_access, verify_device_access, create_access_token
+from backend.services.permissions import (
+    ALL_ROLES,
+    PermissionChecker,
+    has_permission,
+    session_profile,
+)
 from backend.services.inference_worker import ws_manager, inference_worker
 from backend.services.mqtt_service import mqtt_service, ingestion_queue
 from backend.streaming.replay_engine import replay_engine
@@ -20,23 +26,37 @@ from backend.knowledge_graph.graph_engine import MedicalDeviceGraphEngine
 from backend.ml.dataset_manager import DatasetManager
 from backend.rag.knowledge_base_manager import KnowledgeBaseManager
 
+from backend import paths
+
 app = FastAPI(
     title="AI-Powered Medical Device Reliability Intelligence Platform API",
     description="Multi-Tenant Predictive Maintenance API with real-time stream ingestion and Grok RAG integration",
     version="3.0.0"
 )
 
-# Enable CORS for React frontend connection
+# Enable CORS for the React frontend. Origins are explicit so credentials are
+# never shared with an arbitrary site; override with AURA_ALLOWED_ORIGINS.
+ALLOWED_ORIGINS = [
+    origin.strip()
+    for origin in os.getenv(
+        "AURA_ALLOWED_ORIGINS",
+        "http://localhost:5173,http://127.0.0.1:5173,http://localhost:4173,http://localhost:3000",
+    ).split(",")
+    if origin.strip()
+]
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=ALLOWED_ORIGINS,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
+INGEST_API_KEY = os.getenv("AURA_INGEST_API_KEY", "aura_live_ingest_key_2026")
+
 # Paths
-MODELS_DIR = r"C:\Users\Dhamodaran G\Desktop\CTS\models"
+MODELS_DIR = paths.MODELS_DIR
 CACHE_PATH = os.path.join(MODELS_DIR, "device_latest_cache.json")
 
 # In-memory caches and global engines
@@ -111,18 +131,62 @@ class LoginPayload(BaseModel):
     username: str
     password: str
 
-@app.post("/api/v1/auth/login")
-def auth_login(payload: LoginPayload):
+LOGIN_ATTEMPT_LIMIT = 5
+LOGIN_LOCKOUT_SECONDS = 300
+failed_login_attempts = {}
+
+def register_failed_login(username: str):
+    now = datetime.datetime.utcnow()
+    attempts = [t for t in failed_login_attempts.get(username, []) if (now - t).total_seconds() < LOGIN_LOCKOUT_SECONDS]
+    attempts.append(now)
+    failed_login_attempts[username] = attempts
+
+def login_is_throttled(username: str) -> bool:
+    now = datetime.datetime.utcnow()
+    attempts = [t for t in failed_login_attempts.get(username, []) if (now - t).total_seconds() < LOGIN_LOCKOUT_SECONDS]
+    failed_login_attempts[username] = attempts
+    return len(attempts) >= LOGIN_ATTEMPT_LIMIT
+
+def user_identity(row) -> dict:
+    return {
+        "username": row["username"],
+        "hospital_id": row["hospital_id"],
+        "role": row["role"],
+        "department": row["department"],
+        "full_name": row["full_name"] or row["username"],
+        "job_title": row["job_title"] or row["role"].replace("_", " ").title(),
+        "email": row["email"],
+        "phone": row["phone"],
+        "last_login": row["last_login"],
+    }
+
+def load_user_row(username: str):
     conn = get_db_connection()
     cursor = conn.cursor()
-    cursor.execute("SELECT * FROM users WHERE username = ?", (payload.username,))
-    user = cursor.fetchone()
+    cursor.execute("SELECT * FROM users WHERE username = ?", (username,))
+    row = cursor.fetchone()
     conn.close()
-    
+    return row
+
+@app.post("/api/v1/auth/login")
+def auth_login(payload: LoginPayload):
+    if login_is_throttled(payload.username):
+        log_audit_event(None, payload.username, None, "USER_LOGIN_THROTTLED", "users", None, False)
+        raise HTTPException(status_code=429, detail="Too many failed attempts. Try again in a few minutes.")
+
+    user = load_user_row(payload.username)
+
     if not user or user["password_hash"] != hash_password(payload.password):
+        register_failed_login(payload.username)
         log_audit_event(None, payload.username, None, "USER_LOGIN", "users", None, False)
         raise HTTPException(status_code=401, detail="Invalid username or password")
-        
+
+    if not user["is_active"]:
+        log_audit_event(str(user["user_id"]), user["username"], user["hospital_id"], "USER_LOGIN_DISABLED", "users", str(user["user_id"]), False)
+        raise HTTPException(status_code=403, detail="This account has been deactivated. Contact your hospital administrator.")
+
+    failed_login_attempts.pop(payload.username, None)
+
     token_data = {
         "sub": user["username"],
         "hospital_id": user["hospital_id"],
@@ -130,23 +194,235 @@ def auth_login(payload: LoginPayload):
         "department": user["department"]
     }
     token = create_access_token(token_data)
-    
+
+    conn = get_db_connection()
+    conn.execute(
+        "UPDATE users SET last_login = ? WHERE user_id = ?",
+        (datetime.datetime.now().strftime("%Y-%m-%dT%H:%M:%SZ"), user["user_id"]),
+    )
+    conn.commit()
+    conn.close()
+
     log_audit_event(str(user["user_id"]), user["username"], user["hospital_id"], "USER_LOGIN", "users", str(user["user_id"]), True)
-    
+
     return {
         "access_token": token,
         "token_type": "bearer",
-        "user": {
-            "username": user["username"],
-            "hospital_id": user["hospital_id"],
-            "role": user["role"],
-            "department": user["department"]
-        }
+        "user": session_profile(user_identity(user))
     }
 
 @app.get("/api/v1/auth/me")
 def auth_me(current_user: dict = Depends(get_current_user)):
-    return current_user
+    row = load_user_row(current_user["username"])
+    if not row:
+        raise HTTPException(status_code=401, detail="User no longer exists")
+    if not row["is_active"]:
+        raise HTTPException(status_code=403, detail="This account has been deactivated.")
+    return session_profile(user_identity(row))
+
+KPI_LABELS = {
+    "fleet_health": "Fleet health score",
+    "active_users": "Active staff accounts",
+    "connector_status": "Live data connectors",
+    "audit_events_today": "Audit events today",
+    "my_open_alerts": "Alerts assigned to me",
+    "critical_devices": "Critical devices",
+    "devices_due_maintenance": "Devices past due",
+    "model_version": "Active model version",
+    "department_devices": "Devices in my department",
+    "department_open_alerts": "Open alerts in my department",
+    "department_health": "Department health score",
+    "last_alert_at": "Most recent alert",
+    "predicted_failures_7d": "Predicted failures (7 days)",
+    "sla_breaches": "SLA breaches",
+    "top_risk_department": "Highest risk department",
+    "acknowledged_alerts": "Alerts acknowledged",
+}
+
+def compute_kpi(cursor, key: str, user: dict):
+    h_id = user["hospital_id"]
+    department = user.get("department")
+    now = datetime.datetime.now().strftime("%Y-%m-%dT%H:%M:%SZ")
+
+    if key == "fleet_health":
+        row = cursor.execute("SELECT AVG(overall_health) AS v FROM predictions WHERE hospital_id = ?", (h_id,)).fetchone()
+        return f"{round(row['v'] or 0)}%"
+    if key == "department_health":
+        row = cursor.execute("""
+        SELECT AVG(p.overall_health) AS v FROM predictions p JOIN devices d ON d.device_id = p.device_id
+        WHERE p.hospital_id = ? AND d.department = ?
+        """, (h_id, department)).fetchone()
+        return f"{round(row['v'] or 0)}%"
+    if key == "active_users":
+        row = cursor.execute("SELECT COUNT(*) AS v FROM users WHERE hospital_id = ? AND is_active = 1", (h_id,)).fetchone()
+        return row["v"]
+    if key == "connector_status":
+        return "MQTT + replay"
+    if key == "audit_events_today":
+        row = cursor.execute("SELECT COUNT(*) AS v FROM audit_logs WHERE hospital_id = ? AND substr(timestamp, 1, 10) = ?",
+                             (h_id, now[:10])).fetchone()
+        return row["v"]
+    if key == "my_open_alerts":
+        row = cursor.execute("""
+        SELECT COUNT(*) AS v FROM alerts WHERE hospital_id = ? AND status NOT IN ('resolved')
+        AND (owner_username = ? OR owner_username IS NULL)
+        """, (h_id, user["username"])).fetchone()
+        return row["v"]
+    if key == "critical_devices":
+        row = cursor.execute("SELECT COUNT(DISTINCT device_id) AS v FROM alerts WHERE hospital_id = ? AND risk_level = 'CRITICAL'", (h_id,)).fetchone()
+        return row["v"]
+    if key == "devices_due_maintenance":
+        row = cursor.execute("SELECT COUNT(*) AS v FROM alerts WHERE hospital_id = ? AND due_by IS NOT NULL AND due_by < ? AND status != 'resolved'",
+                             (h_id, now)).fetchone()
+        return row["v"]
+    if key == "model_version":
+        row = cursor.execute("SELECT model_version FROM predictions WHERE hospital_id = ? ORDER BY timestamp DESC LIMIT 1", (h_id,)).fetchone()
+        return row["model_version"] if row else "n/a"
+    if key == "department_devices":
+        row = cursor.execute("SELECT COUNT(*) AS v FROM devices WHERE hospital_id = ? AND department = ?", (h_id, department)).fetchone()
+        return row["v"]
+    if key == "department_open_alerts":
+        row = cursor.execute("SELECT COUNT(*) AS v FROM alerts WHERE hospital_id = ? AND department = ? AND status != 'resolved'",
+                             (h_id, department)).fetchone()
+        return row["v"]
+    if key == "last_alert_at":
+        row = cursor.execute("SELECT timestamp FROM alerts WHERE hospital_id = ? ORDER BY timestamp DESC LIMIT 1", (h_id,)).fetchone()
+        return row["timestamp"] if row else "No alerts"
+    if key == "predicted_failures_7d":
+        row = cursor.execute("SELECT COUNT(*) AS v FROM predictions WHERE hospital_id = ? AND failure_probability >= 0.6", (h_id,)).fetchone()
+        return row["v"]
+    if key == "sla_breaches":
+        row = cursor.execute("SELECT COUNT(*) AS v FROM alerts WHERE hospital_id = ? AND due_by IS NOT NULL AND due_by < ? AND status != 'resolved'",
+                             (h_id, now)).fetchone()
+        return row["v"]
+    if key == "top_risk_department":
+        row = cursor.execute("""
+        SELECT department, COUNT(*) AS c FROM alerts WHERE hospital_id = ? AND risk_level IN ('HIGH', 'CRITICAL')
+        GROUP BY department ORDER BY c DESC LIMIT 1
+        """, (h_id,)).fetchone()
+        return row["department"] if row else "None"
+    if key == "acknowledged_alerts":
+        row = cursor.execute("SELECT COUNT(*) AS v FROM alerts WHERE hospital_id = ? AND status != 'active'", (h_id,)).fetchone()
+        return row["v"]
+    return "n/a"
+
+@app.get("/api/v1/workspace/summary")
+def workspace_summary(current_user: dict = Depends(get_current_user)):
+    """Role-specific KPI cards rendered on each role's landing page."""
+    profile = session_profile(current_user)
+    conn = get_db_connection()
+    cursor = conn.cursor()
+    cards = [
+        {"key": key, "label": KPI_LABELS.get(key, key), "value": compute_kpi(cursor, key, current_user)}
+        for key in profile["kpis"]
+    ]
+    conn.close()
+    return {
+        "role": current_user["role"],
+        "role_label": profile["role_label"],
+        "mission": profile["mission"],
+        "primary_actions": profile["primary_actions"],
+        "kpis": cards,
+    }
+
+# ==========================================
+# MODULE 0b: Team & Access Management (Hospital Admin)
+# ==========================================
+
+class CreateUserPayload(BaseModel):
+    username: str
+    password: str
+    role: str
+    full_name: str
+    job_title: Optional[str] = None
+    email: Optional[str] = None
+    phone: Optional[str] = None
+    department: Optional[str] = None
+
+class UpdateUserStatusPayload(BaseModel):
+    is_active: bool
+
+def serialize_user(row) -> dict:
+    return {
+        "user_id": row["user_id"],
+        "username": row["username"],
+        "full_name": row["full_name"] or row["username"],
+        "job_title": row["job_title"],
+        "email": row["email"],
+        "phone": row["phone"],
+        "role": row["role"],
+        "department": row["department"],
+        "is_active": bool(row["is_active"]),
+        "created_at": row["created_at"],
+        "last_login": row["last_login"],
+    }
+
+@app.get("/api/v1/admin/roles")
+def list_roles(current_user: dict = Depends(PermissionChecker("user:manage"))):
+    return {"roles": ALL_ROLES}
+
+@app.get("/api/v1/admin/users")
+def list_users(current_user: dict = Depends(PermissionChecker("user:manage"))):
+    conn = get_db_connection()
+    cursor = conn.cursor()
+    cursor.execute("SELECT * FROM users WHERE hospital_id = ? ORDER BY role, full_name", (current_user["hospital_id"],))
+    users = [serialize_user(r) for r in cursor.fetchall()]
+    conn.close()
+    return users
+
+@app.post("/api/v1/admin/users")
+def create_user(payload: CreateUserPayload, current_user: dict = Depends(PermissionChecker("user:manage"))):
+    if payload.role not in ALL_ROLES:
+        raise HTTPException(status_code=400, detail=f"Unknown role. Allowed roles: {ALL_ROLES}")
+    if len(payload.password) < 8:
+        raise HTTPException(status_code=400, detail="Password must be at least 8 characters long.")
+    if payload.role == "DEPARTMENT_OPERATOR" and not payload.department:
+        raise HTTPException(status_code=400, detail="Department operators must be assigned to a department.")
+
+    conn = get_db_connection()
+    cursor = conn.cursor()
+    cursor.execute("SELECT user_id FROM users WHERE username = ?", (payload.username,))
+    if cursor.fetchone():
+        conn.close()
+        raise HTTPException(status_code=409, detail="That username is already taken.")
+
+    cursor.execute("""
+    INSERT INTO users (hospital_id, username, password_hash, role, department, full_name, job_title, email, phone, is_active, created_at)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?)
+    """, (
+        current_user["hospital_id"], payload.username, hash_password(payload.password), payload.role,
+        payload.department, payload.full_name, payload.job_title, payload.email, payload.phone,
+        datetime.datetime.now().strftime("%Y-%m-%dT%H:%M:%SZ"),
+    ))
+    conn.commit()
+    user_id = cursor.lastrowid
+    conn.close()
+
+    log_audit_event(current_user["username"], current_user["username"], current_user["hospital_id"],
+                    "USER_CREATED", "users", str(user_id), True)
+    return {"success": True, "user_id": user_id}
+
+@app.patch("/api/v1/admin/users/{user_id}/status")
+def set_user_status(user_id: int, payload: UpdateUserStatusPayload, current_user: dict = Depends(PermissionChecker("user:manage"))):
+    conn = get_db_connection()
+    cursor = conn.cursor()
+    cursor.execute("SELECT * FROM users WHERE user_id = ?", (user_id,))
+    row = cursor.fetchone()
+    if not row:
+        conn.close()
+        raise HTTPException(status_code=404, detail="User not found")
+    verify_tenant_access(row["hospital_id"], current_user)
+    if row["username"] == current_user["username"]:
+        conn.close()
+        raise HTTPException(status_code=400, detail="You cannot deactivate your own account.")
+
+    cursor.execute("UPDATE users SET is_active = ? WHERE user_id = ?", (1 if payload.is_active else 0, user_id))
+    conn.commit()
+    conn.close()
+
+    log_audit_event(current_user["username"], current_user["username"], current_user["hospital_id"],
+                    "USER_ACTIVATED" if payload.is_active else "USER_DEACTIVATED", "users", str(user_id), True)
+    return {"success": True}
 
 # ==========================================
 # MODULE 1: Live Logs, Devices & Heatmap
@@ -226,11 +502,7 @@ def get_live_alerts(current_user: dict = Depends(get_current_user)):
     return clean_nans(rows)
 
 @app.post("/api/v1/live/alerts/{alert_id}/acknowledge")
-def acknowledge_alert(alert_id: int, current_user: dict = Depends(get_current_user)):
-    # Operators and engineers can acknowledge alerts
-    if current_user["role"] not in ["HOSPITAL_ADMIN", "BIOMEDICAL_ENGINEER", "DEPARTMENT_OPERATOR"]:
-        raise HTTPException(status_code=403, detail="Unauthorized action")
-        
+def acknowledge_alert(alert_id: int, current_user: dict = Depends(PermissionChecker("alert:acknowledge"))):
     conn = get_db_connection()
     cursor = conn.cursor()
     cursor.execute("SELECT hospital_id, device_id FROM alerts WHERE alert_id = ?", (alert_id,))
@@ -258,6 +530,93 @@ def acknowledge_alert(alert_id: int, current_user: dict = Depends(get_current_us
     )
     return {"success": True}
 
+class AssignAlertPayload(BaseModel):
+    owner_username: str
+    due_hours: int = 8
+
+class ResolveAlertPayload(BaseModel):
+    resolution_note: str
+    downtime_minutes: Optional[int] = None
+
+def load_alert(cursor, alert_id: int, current_user: dict):
+    cursor.execute("SELECT * FROM alerts WHERE alert_id = ?", (alert_id,))
+    row = cursor.fetchone()
+    if not row:
+        raise HTTPException(status_code=404, detail="Alert not found")
+    verify_tenant_access(row["hospital_id"], current_user)
+    return row
+
+@app.post("/api/v1/live/alerts/{alert_id}/assign")
+def assign_alert(alert_id: int, payload: AssignAlertPayload, current_user: dict = Depends(PermissionChecker("alert:assign"))):
+    """Give an alert an accountable owner and an SLA due time."""
+    conn = get_db_connection()
+    cursor = conn.cursor()
+    load_alert(cursor, alert_id, current_user)
+
+    cursor.execute("SELECT * FROM users WHERE username = ? AND hospital_id = ?", (payload.owner_username, current_user["hospital_id"]))
+    owner = cursor.fetchone()
+    if not owner:
+        conn.close()
+        raise HTTPException(status_code=404, detail="Owner not found in this hospital")
+
+    now = datetime.datetime.now()
+    due_by = (now + datetime.timedelta(hours=max(1, payload.due_hours))).strftime("%Y-%m-%dT%H:%M:%SZ")
+    cursor.execute("""
+    UPDATE alerts SET status = 'assigned', owner_username = ?, owner_name = ?, assigned_at = ?, due_by = ?
+    WHERE alert_id = ?
+    """, (owner["username"], owner["full_name"] or owner["username"], now.strftime("%Y-%m-%dT%H:%M:%SZ"), due_by, alert_id))
+    conn.commit()
+    conn.close()
+
+    log_audit_event(current_user["username"], current_user["username"], current_user["hospital_id"],
+                    "ALERT_ASSIGNED", "alerts", str(alert_id), True)
+    return {"success": True, "owner": owner["full_name"] or owner["username"], "due_by": due_by}
+
+@app.post("/api/v1/live/alerts/{alert_id}/escalate")
+def escalate_alert(alert_id: int, current_user: dict = Depends(PermissionChecker("alert:escalate"))):
+    conn = get_db_connection()
+    cursor = conn.cursor()
+    row = load_alert(cursor, alert_id, current_user)
+
+    level = (row["escalation_level"] or 0) + 1
+    cursor.execute("UPDATE alerts SET escalation_level = ?, status = 'escalated' WHERE alert_id = ?", (level, alert_id))
+    conn.commit()
+    conn.close()
+
+    log_audit_event(current_user["username"], current_user["username"], current_user["hospital_id"],
+                    "ALERT_ESCALATED", "alerts", str(alert_id), True)
+    return {"success": True, "escalation_level": level}
+
+@app.post("/api/v1/live/alerts/{alert_id}/resolve")
+def resolve_alert(alert_id: int, payload: ResolveAlertPayload, current_user: dict = Depends(PermissionChecker("alert:resolve"))):
+    conn = get_db_connection()
+    cursor = conn.cursor()
+    load_alert(cursor, alert_id, current_user)
+
+    cursor.execute("""
+    UPDATE alerts SET status = 'resolved', resolution_note = ?, downtime_minutes = ?, closed_at = ?
+    WHERE alert_id = ?
+    """, (payload.resolution_note, payload.downtime_minutes, datetime.datetime.now().strftime("%Y-%m-%dT%H:%M:%SZ"), alert_id))
+    conn.commit()
+    conn.close()
+
+    log_audit_event(current_user["username"], current_user["username"], current_user["hospital_id"],
+                    "ALERT_RESOLVED", "alerts", str(alert_id), True)
+    return {"success": True}
+
+@app.get("/api/v1/live/assignable-users")
+def assignable_users(current_user: dict = Depends(PermissionChecker("alert:assign"))):
+    """Engineers available to own an alert, used by the assignment dialog."""
+    conn = get_db_connection()
+    cursor = conn.cursor()
+    cursor.execute("""
+    SELECT username, full_name, job_title, department FROM users
+    WHERE hospital_id = ? AND role = 'BIOMEDICAL_ENGINEER' AND is_active = 1 ORDER BY full_name
+    """, (current_user["hospital_id"],))
+    rows = [dict(r) for r in cursor.fetchall()]
+    conn.close()
+    return rows
+
 # ==========================================
 # MODULE 2: Telemetry Ingest & Replay Controls
 # ==========================================
@@ -270,7 +629,7 @@ class MQTTConnectPayload(BaseModel):
     topic: Optional[str] = None
 
 @app.post("/api/v1/stream/mqtt/connect")
-def connect_mqtt(payload: MQTTConnectPayload, current_user: dict = Depends(RoleChecker(["HOSPITAL_ADMIN"]))):
+def connect_mqtt(payload: MQTTConnectPayload, current_user: dict = Depends(PermissionChecker("connector:manage"))):
     # Overwrite MQTT globals dynamically
     import backend.services.mqtt_service as ms
     ms.MQTT_BROKER_HOST = payload.host
@@ -302,7 +661,7 @@ class ReplayStartPayload(BaseModel):
     speed: float
 
 @app.post("/api/v1/stream/replay/start")
-def start_replay(payload: ReplayStartPayload, current_user: dict = Depends(RoleChecker(["HOSPITAL_ADMIN", "BIOMEDICAL_ENGINEER"]))):
+def start_replay(payload: ReplayStartPayload, current_user: dict = Depends(PermissionChecker("replay:control"))):
     # Lookup device department and type from database to construct dynamic subscriber topic namespaces
     conn = get_db_connection()
     cursor = conn.cursor()
@@ -335,12 +694,12 @@ def start_replay(payload: ReplayStartPayload, current_user: dict = Depends(RoleC
     return {"success": True}
 
 @app.post("/api/v1/stream/replay/pause")
-def pause_replay(current_user: dict = Depends(RoleChecker(["HOSPITAL_ADMIN", "BIOMEDICAL_ENGINEER"]))):
+def pause_replay(current_user: dict = Depends(PermissionChecker("replay:control"))):
     replay_engine.pause_replay()
     return {"success": True}
 
 @app.post("/api/v1/stream/replay/stop")
-def stop_replay(current_user: dict = Depends(RoleChecker(["HOSPITAL_ADMIN", "BIOMEDICAL_ENGINEER"]))):
+def stop_replay(current_user: dict = Depends(PermissionChecker("replay:control"))):
     replay_engine.stop_replay()
     return {"success": True}
 
@@ -512,7 +871,7 @@ def list_knowledge_sources(current_user: dict = Depends(get_current_user)):
 # ==========================================
 
 @app.get("/api/v1/audit/logs")
-def get_audit_logs(current_user: dict = Depends(RoleChecker(["HOSPITAL_ADMIN", "AUDITOR"]))):
+def get_audit_logs(current_user: dict = Depends(PermissionChecker("audit:view"))):
     conn = get_db_connection()
     cursor = conn.cursor()
     cursor.execute("SELECT * FROM audit_logs WHERE hospital_id = ? ORDER BY timestamp DESC LIMIT 500", (current_user["hospital_id"],))
@@ -868,7 +1227,7 @@ def process_uploaded_dataset_to_devices(filename: str, content: bytes, hospital_
 @app.post("/api/v1/datasets/upload")
 async def upload_dataset(
     file: UploadFile = File(...),
-    current_user: dict = Depends(RoleChecker(["HOSPITAL_ADMIN", "BIOMEDICAL_ENGINEER"]))
+    current_user: dict = Depends(PermissionChecker("dataset:manage"))
 ):
     try:
         content = await file.read()
@@ -909,7 +1268,7 @@ def validate_dataset(payload: ValidateDatasetPayload, current_user: dict = Depen
         raise HTTPException(status_code=500, detail=f"Dataset validation failed: {str(e)}")
 
 @app.delete("/api/v1/datasets/{dataset_id}")
-def delete_dataset(dataset_id: str, current_user: dict = Depends(RoleChecker(["HOSPITAL_ADMIN", "BIOMEDICAL_ENGINEER"]))):
+def delete_dataset(dataset_id: str, current_user: dict = Depends(PermissionChecker("dataset:manage"))):
     success = dataset_manager.delete_dataset(dataset_id)
     if not success:
         raise HTTPException(status_code=404, detail="Dataset not found")
@@ -935,7 +1294,7 @@ async def upload_manual(
     device_type: str = Form(default="Medical Device"),
     manufacturer: str = Form(default="Unknown"),
     version: str = Form(default="1.0"),
-    current_user: dict = Depends(RoleChecker(["HOSPITAL_ADMIN", "BIOMEDICAL_ENGINEER"]))
+    current_user: dict = Depends(PermissionChecker("knowledge:manage"))
 ):
     import traceback
     try:
@@ -999,7 +1358,7 @@ def get_document_chunks(document_id: str, current_user: dict = Depends(get_curre
         raise HTTPException(status_code=500, detail=f"Failed to fetch chunks: {str(e)}")
 
 @app.delete("/api/v1/knowledge/documents/{document_id}")
-def delete_document(document_id: str, current_user: dict = Depends(RoleChecker(["HOSPITAL_ADMIN", "BIOMEDICAL_ENGINEER"]))):
+def delete_document(document_id: str, current_user: dict = Depends(PermissionChecker("knowledge:manage"))):
     success = knowledge_manager.delete_document(document_id, current_user["hospital_id"])
     if not success:
         raise HTTPException(status_code=404, detail="Document not found or access denied")
@@ -1077,7 +1436,7 @@ async def ingest_telemetry_payload(payload: TelemetryIngestPayload, x_api_key: O
         d_id = payload.device_id
         
         # Check API key if provided
-        if x_api_key and x_api_key != "aura_live_ingest_key_2026":
+        if x_api_key and x_api_key != INGEST_API_KEY:
             raise HTTPException(status_code=401, detail="Invalid X-API-Key header")
             
         py_payload = payload.dict()
@@ -1355,7 +1714,7 @@ def parse_prompt_to_telemetry(prompt: str):
 
 @app.get("/api/v1/model/metadata")
 def get_model_metadata(current_user: dict = Depends(get_current_user)):
-    metadata_path = r"C:\Users\Dhamodaran G\Desktop\CTS\models\model_metadata.json"
+    metadata_path = paths.MODEL_METADATA_PATH
     if os.path.exists(metadata_path):
         try:
             with open(metadata_path, "r") as f:
@@ -1418,7 +1777,7 @@ def get_model_train_status(current_user: dict = Depends(get_current_user)):
     return global_training_status
 
 @app.post("/api/v1/model/retrain")
-def retrain_model_pipeline(current_user: dict = Depends(RoleChecker(["HOSPITAL_ADMIN", "BIOMEDICAL_ENGINEER"]))):
+def retrain_model_pipeline(current_user: dict = Depends(PermissionChecker("model:retrain"))):
     global global_training_status
     if global_training_status["is_training"]:
         return {"success": False, "message": "ML Pipeline is already running"}
